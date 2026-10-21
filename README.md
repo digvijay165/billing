@@ -43,6 +43,7 @@ It reads your company's **MRP Excel list** (kept private to your shop), creates 
 | Feature | Description |
 | --- | --- |
 | 🔍 **Instant part lookup** | Search your uploaded price list by part number or description right from the Home page |
+| 📚 **Multiple price lists** | Keep one MRP list per company or brand; search, replace, rename or remove each one |
 | ⌨️ **Type & Enter billing** | Enter a part number and the MRP and GST rate fill in automatically |
 | ➕ **Smart quantities** | Adding the same part again increases its quantity |
 | 🔧 **Labour & extras** | Add labour lines, discounts, and notes to any bill |

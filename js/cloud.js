@@ -111,58 +111,82 @@
     if (changed) FF.replaceDb(db);
   }
 
-  // ---- The shop's own uploaded MRP price list
-  // Kept on this device under a key for this shop only, and in the cloud where only this shop can read it.
-  // The local record may carry `pending`: true = upload it, 'clear' = remove the shop's list,
-  // 'claim' = an old list from before lists were per shop; upload it only if the shop has none yet.
+  // ---- The shop's own uploaded MRP price lists (a shop can have several, e.g. one per company)
+  // Kept on this device under a key for this shop only, and in the cloud where only this shop can read them.
+  // The local record is {lists, removed} (see plNorm in index.html). Each list may carry `pending`:
+  // true = upload it, 'rename' = send its new name, 'claim' = an old list from before lists were per shop,
+  // uploaded only if the shop has none yet. `removed` holds ids of lists to delete from the shop.
   const LEGACY_PL = 'pricelist', CHUNK = 5000;
   let plBusy = false, plAgain = false;
   const plKey = () => 'pricelist_' + shop.id;
+  const plSig = rec => rec.lists.map(l => l.id + ':' + (l.version || '') + ':' + l.name + ':' + (l.pending || '')).join('|');
   async function syncPriceList() {
     if (!shop || !navigator.onLine) return;
     if (plBusy) { plAgain = true; return }
     plBusy = true;
     const id = shop.id, key = plKey();
+    let before = '';
     try {
-      let local = null; try { local = await FF.idbGet(key) } catch {}
+      let local = FF.plNorm(null); try { local = FF.plNorm(await FF.idbGet(key)) } catch {}
+      before = plSig(local);
       const owner = role === 'owner';
-      if (local?.pending === 'clear' && owner) {
-        let r = await sb.from('price_lists').delete().eq('shop_id', id); if (r.error) throw r.error;
-        r = await sb.from('price_list_chunks').delete().eq('shop_id', id); if (r.error) throw r.error;
-        await FF.idbDel(key); FF.toast('Price list removed from your shop.');
-        return;
-      }
-      const { data: cur, error } = await sb.from('price_lists').select('version,name,parts,chunks').eq('shop_id', id).maybeSingle();
-      if (error) throw error;
-      if (owner && local?.rows?.length && (local.pending === true || (local.pending === 'claim' && !cur))) {
-        const version = crypto.randomUUID(), n = Math.ceil(local.rows.length / CHUNK);
-        for (let i = 0; i < n; i++) {
-          const r = await sb.from('price_list_chunks').insert({ shop_id: id, version, n: i, rows: local.rows.slice(i * CHUNK, (i + 1) * CHUNK) });
-          if (r.error) throw r.error;
+      if (owner) {
+        for (const lid of local.removed) {
+          let r = await sb.from('price_lists').delete().eq('shop_id', id).eq('list_id', lid); if (r.error) throw r.error;
+          r = await sb.from('price_list_chunks').delete().eq('shop_id', id).eq('list_id', lid); if (r.error) throw r.error;
+          await FF.plUpdate(key, rec => { rec.removed = rec.removed.filter(x => x !== lid); return rec });
         }
-        let r = await sb.from('price_lists').upsert({ shop_id: id, version, name: local.name, parts: local.rows.length, chunks: n, updated_at: new Date().toISOString() });
-        if (r.error) throw r.error;
-        await sb.from('price_list_chunks').delete().eq('shop_id', id).neq('version', version);
-        await FF.idbPut(key, { name: local.name, rows: local.rows, version });
-        FF.toast(`Price list saved to your shop: ${local.rows.length.toLocaleString('en-IN')} parts.`);
-        return;
       }
-      if (!cur) {
-        // The shop has no uploaded list: remove any old copy from this device.
-        if (local && !(owner && local.pending)) { await FF.idbDel(key); if (shop?.id === id) FF.usePriceList(key) }
-        return;
+      const list = async () => { const r = await sb.from('price_lists').select('list_id,version,name,parts,chunks').eq('shop_id', id).order('updated_at'); if (r.error) throw r.error; return r.data };
+      let cur = await list();
+      if (owner) {
+        let changed = false;
+        for (const l of local.lists) {
+          if (l.pending === true || (l.pending === 'claim' && !cur.length)) {
+            const version = crypto.randomUUID(), n = Math.ceil(l.rows.length / CHUNK);
+            for (let i = 0; i < n; i++) {
+              const r = await sb.from('price_list_chunks').insert({ shop_id: id, list_id: l.id, version, n: i, rows: l.rows.slice(i * CHUNK, (i + 1) * CHUNK) });
+              if (r.error) throw r.error;
+            }
+            let r = await sb.from('price_lists').upsert({ shop_id: id, list_id: l.id, version, name: l.name, parts: l.rows.length, chunks: n, updated_at: new Date().toISOString() });
+            if (r.error) throw r.error;
+            await sb.from('price_list_chunks').delete().eq('shop_id', id).eq('list_id', l.id).neq('version', version);
+            // Only mark it saved if it wasn't replaced again while uploading.
+            await FF.plUpdate(key, rec => { const x = rec.lists.find(y => y.id === l.id); if (x && x.importedAt === l.importedAt && x.pending === l.pending) { x.version = version; delete x.pending } return rec });
+            FF.toast(`${l.name} saved to your shop: ${l.rows.length.toLocaleString('en-IN')} parts.`);
+            changed = true;
+          } else if (l.pending === 'rename' && l.version) {
+            const r = await sb.from('price_lists').update({ name: l.name }).eq('shop_id', id).eq('list_id', l.id); if (r.error) throw r.error;
+            await FF.plUpdate(key, rec => { const x = rec.lists.find(y => y.id === l.id); if (x && x.pending === 'rename' && x.name === l.name) delete x.pending; return rec });
+            changed = true;
+          }
+        }
+        if (changed) cur = await list();
       }
-      if (local?.version === cur.version) return;
-      if (owner && local?.pending === true) return;
-      const rows = [];
-      for (let i = 0; i < cur.chunks; i += 4) {
-        const r = await sb.from('price_list_chunks').select('n,rows').eq('shop_id', id).eq('version', cur.version).gte('n', i).lt('n', i + 4).order('n');
-        if (r.error) throw r.error;
-        for (const c of r.data) rows.push(...c.rows);
+      // Download lists that are new or changed on another device.
+      local = FF.plNorm(await FF.idbGet(key));
+      const got = new Map();
+      for (const c of cur) {
+        const l = local.lists.find(x => x.id === c.list_id);
+        if (local.removed.includes(c.list_id) || (l && (l.version === c.version || (owner && l.pending === true)))) continue;
+        const rows = [];
+        for (let i = 0; i < c.chunks; i += 4) {
+          const r = await sb.from('price_list_chunks').select('n,rows').eq('shop_id', id).eq('version', c.version).gte('n', i).lt('n', i + 4).order('n');
+          if (r.error) throw r.error;
+          for (const ch of r.data) rows.push(...ch.rows);
+        }
+        if (rows.length !== c.parts) continue; // Still being uploaded; try again later.
+        got.set(c.list_id, { id: c.list_id, name: c.name, rows, version: c.version });
       }
-      if (rows.length !== cur.parts) return; // A new list is still being uploaded; try again later.
-      await FF.idbPut(key, { name: cur.name, rows, version: cur.version });
-      if (shop?.id === id) FF.usePriceList(key);
+      const ids = new Map(cur.map(c => [c.list_id, c]));
+      const rec = await FF.plUpdate(key, rec => {
+        // Drop lists the shop no longer has (keeping the owner's unsent ones), apply downloads and renames.
+        rec.lists = rec.lists.filter(l => ids.has(l.id) || (owner && (l.pending === true || (l.pending === 'claim' && !cur.length))))
+          .map(l => { const g = got.get(l.id); if (g && !(owner && l.pending === true)) return g; const c = ids.get(l.id); if (c && l.version === c.version && !l.pending && l.name !== c.name) l.name = c.name; return l });
+        for (const [lid, g] of got) if (!rec.lists.some(x => x.id === lid)) rec.lists.push(g);
+        return rec;
+      });
+      if (plSig(rec) !== before && shop?.id === id) FF.usePriceList(key);
     } catch (e) {
       if (role === 'owner') console.warn('Price list sync failed; will retry.', e);
     } finally {
@@ -170,14 +194,13 @@
       if (plAgain) { plAgain = false; syncPriceList() }
     }
   }
-  // Lists uploaded before this change were shared by everyone on the device.
+  // Lists uploaded before lists were per shop were shared by everyone on the device.
   // Hand such a list to the first shop owner who opens here, then remove the shared copy.
   async function adoptLegacyPriceList() {
     try {
-      const old = await FF.idbGet(LEGACY_PL); if (!old) return;
-      await FF.idbDel(LEGACY_PL);
-      if (role !== 'owner' || !old.rows?.length || await FF.idbGet(plKey())) return;
-      await FF.idbPut(plKey(), { name: old.name, rows: old.rows, pending: 'claim' });
+      const old = FF.plNorm(await FF.idbGet(LEGACY_PL)); await FF.idbDel(LEGACY_PL);
+      if (role !== 'owner' || !old.lists.length || FF.plNorm(await FF.idbGet(plKey())).lists.length) return;
+      await FF.idbPut(plKey(), { lists: old.lists.map(l => ({ ...l, version: undefined, pending: 'claim' })), removed: [] });
     } catch {}
   }
 
@@ -326,7 +349,7 @@
         // Everything is in the cloud: remove this shop's copy so the next person on this device can't see it.
         if (shop && !waiting) {
           let pl = null; try { pl = await FF.idbGet(plKey()) } catch {}
-          if (!pl?.pending) { try { await FF.idbDel(plKey()) } catch {} }
+          if (!FF.plPending(pl)) { try { await FF.idbDel(plKey()) } catch {} }
           try { [dataKey(), metaKey(), LAST].forEach(k => localStorage.removeItem(k)) } catch {}
         }
         await sb.auth.signOut(); location.reload();

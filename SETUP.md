@@ -64,6 +64,8 @@ They can't delete anything, see reports or expenses, or change settings.
   The sidebar shows "Saved to cloud" or how many changes are waiting.
 - **Bill numbers:** if two devices make a bill at the same moment while offline, they can get the same number.
   Edit one of them if that happens.
-- **Uploaded MRP Excel lists** belong to the shop that uploaded them. Only the owner can upload one;
-  staff get it on every device, and other shops can never see it. No list is built in: each shop uploads its own.
-- **Updating an existing project:** run `supabase/schema.sql` again (it is safe to re-run) to add the price-list tables.
+- **Uploaded MRP Excel lists** belong to the shop that uploaded them. A shop can keep several lists
+  (for example one per company); searches and bills look through all of them. Only the owner can add,
+  replace, rename or remove a list; staff get them on every device, and other shops can never see them.
+  No list is built in: each shop uploads its own.
+- **Updating an existing project:** run `supabase/schema.sql` again (it is safe to re-run) to add or update the price-list tables. Do this before publishing a new version of the site.

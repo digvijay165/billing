@@ -129,29 +129,42 @@ create policy docs_update on public.docs for update
     or (public.my_role(shop_id) = 'staff' and collection in ('catalog', 'invoices', 'stock', 'purchases') and not deleted)
   );
 
--- Each shop's uploaded MRP price list. Private to that shop: other shops can never read it.
--- The list is large (60,000+ parts), so it is stored in chunks. A new upload writes its chunks
+-- Each shop's uploaded MRP price lists (a shop can keep several, e.g. one per company).
+-- Private to that shop: other shops can never read them.
+-- A list is large (60,000+ parts), so it is stored in chunks. A new upload writes its chunks
 -- under a new version, then points price_lists at it, so devices never read a half-written list.
 create table if not exists public.price_lists (
-  shop_id uuid primary key references public.shops(id) on delete cascade,
+  shop_id uuid not null references public.shops(id) on delete cascade,
+  list_id text not null default 'main',
   version text not null,
   name text not null,
   parts integer not null,
   chunks integer not null,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (shop_id, list_id)
 );
 create table if not exists public.price_list_chunks (
   shop_id uuid not null references public.shops(id) on delete cascade,
+  list_id text not null default 'main',
   version text not null,
   n integer not null,
   rows jsonb not null,
   primary key (shop_id, version, n)
 );
+-- Projects made before shops could have several lists: add list_id and key lists by (shop_id, list_id).
+alter table public.price_lists add column if not exists list_id text not null default 'main';
+alter table public.price_list_chunks add column if not exists list_id text not null default 'main';
+do $$ begin
+  if (select array_length(conkey, 1) from pg_constraint where conname = 'price_lists_pkey') = 1 then
+    alter table public.price_lists drop constraint price_lists_pkey;
+    alter table public.price_lists add primary key (shop_id, list_id);
+  end if;
+end $$;
 
 alter table public.price_lists enable row level security;
 alter table public.price_list_chunks enable row level security;
 
--- Everyone in the shop can read its list. Only the owner can upload or remove it.
+-- Everyone in the shop can read its lists. Only the owner can upload, rename or remove them.
 drop policy if exists price_lists_read on public.price_lists;
 create policy price_lists_read on public.price_lists for select using (public.my_role(shop_id) is not null);
 drop policy if exists price_lists_owner on public.price_lists;
